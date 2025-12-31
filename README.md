@@ -1,13 +1,14 @@
 # Code Diff Analyzer
 
-A Python tool to analyze code changes between git branches and extract detailed information from infiniloom codebase maps.
+A Python tool to analyze Java code changes between git branches and pack them using infiniloom for LLM consumption.
 
 ## Features
 
 - Compares two git branches to identify changed files
-- Generates a codebase map using infiniloom
-- Extracts relevant information for changed files from the codebase map
-- Provides detailed output of changes and their context
+- Automatically fetches remote branches if not available locally
+- Filters only Java files from the changes
+- Uses infiniloom pack to create an LLM-ready file with changed Java code
+- Outputs to a dedicated output directory
 
 ## Prerequisites
 
@@ -64,17 +65,18 @@ The tool reads `REPO_PATH` from the `.env` file automatically:
 # Compare using explicit repo path (bypasses .env)
 ./main.py develop staging --repo-path /var/projects/myapp
 
-# Compare branches in current directory
-./main.py origin/main HEAD --repo-path .
+# Specify custom output directory
+./main.py main feature/auth --output-dir my-output
 ```
 
 ## Output
 
-The tool provides three main outputs:
+The tool generates:
 
-1. **Execution Progress**: Shows steps being executed
-2. **Changed Files List**: Numbered list of all files that changed between branches
-3. **File Details**: Information extracted from the codebase map for each changed file
+1. **Console Output**: Shows execution progress and summary
+2. **llm.txt**: Infiniloom-packed file containing all changed Java files (saved to `output/llm.txt` by default)
+
+The output file uses infiniloom's toon format with balanced compression, optimized for LLM consumption.
 
 ## Configuration
 
@@ -91,10 +93,11 @@ REPO_PATH=/Users/username/projects/myrepo
 
 1. Loads configuration from `.env` file using python-dotenv
 2. Validates the repository path from .env or --repo-path argument
-3. Executes `infiniloom map . --output codebase-map.txt` in the repo directory
+3. Checks if branches exist locally, fetches from remote if needed
 4. Runs `git diff --name-only source...destination` to get changed files
-5. Parses the generated codebase-map.txt file
-6. Extracts and displays information for each changed file
+5. Filters only `.java` files from the changed files
+6. Executes `infiniloom pack . --format toon --compression balanced --output llm.txt --include <file1> --include <file2> ...` with all Java files
+7. Saves the output to the `output/` directory (or custom directory via --output-dir)
 
 ## Error Handling
 
@@ -103,7 +106,8 @@ The tool will exit with an error if:
 - The repository path doesn't exist
 - infiniloom is not installed or not in PATH
 - Git commands fail (invalid branches, not a git repo, etc.)
-- The codebase map file cannot be generated or read
+- No Java files found in the changes
+- The infiniloom pack command fails
 
 ## Return Value
 
@@ -111,16 +115,15 @@ When used as a module, the `main()` function returns a dictionary with:
 
 ```python
 {
-    'changed_files': ['file1.py', 'file2.js', ...],
-    'file_info': {
-        'file1.py': ['...context from codebase map...'],
-        'file2.js': ['...context from codebase map...'],
-    }
+    'changed_files': ['file1.java', 'file2.py', 'file3.java', ...],
+    'java_files': ['file1.java', 'file3.java', ...],
+    'output_file': '/path/to/output/llm.txt'
 }
 ```
 
 ## Notes
 
 - The git diff uses three-dot syntax (`source...destination`) to show changes between the common ancestor and destination
-- The codebase map file is generated in the repository root
-- File matching in the codebase map includes context lines before and after mentions
+- Only Java files (`.java` extension) are processed
+- If branches are not found locally, the tool automatically runs `git fetch --all`
+- The output directory is created automatically if it doesn't exist

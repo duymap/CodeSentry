@@ -24,6 +24,7 @@ env/
 
 # Output files
 codebase-map.txt
+output/
 
 # OS
 .DS_Store

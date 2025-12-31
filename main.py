@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Code Diff Analyzer Tool
-Analyzes changed files between git branches and extracts their information from codebase map.
+Analyzes Java code changes between git branches and packs them using infiniloom.
 """
 
 import os
@@ -9,7 +9,7 @@ import sys
 import subprocess
 import argparse
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List
 from dotenv import load_dotenv
 
 
@@ -89,23 +89,48 @@ def ensure_branch_exists(repo_path: str, branch: str) -> str:
     raise ValueError(f"Branch '{branch}' not found even after fetching. Please check the branch name.")
 
 
-def execute_infiniloom_map(repo_path: str) -> str:
-    """Execute infiniloom map command to generate codebase map."""
-    output_file = os.path.join(repo_path, 'codebase-map.txt')
+def filter_java_files(files: List[str]) -> List[str]:
+    """Filter only Java files from the list."""
+    java_files = [f for f in files if f.endswith('.java')]
+    return java_files
+
+
+def execute_infiniloom_pack(repo_path: str, java_files: List[str], output_dir: str) -> str:
+    """Execute infiniloom pack command for changed Java files."""
+    if not java_files:
+        raise ValueError("No Java files found in the changed files")
+
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Build the output path relative to the script location
+    output_file = os.path.join(output_dir, 'llm.txt')
+
+    # Build the command
+    cmd = ['infiniloom', 'pack', '.', '--format', 'toon', '--compression', 'balanced', '--output', output_file]
+
+    # Add --include for each Java file
+    for java_file in java_files:
+        cmd.extend(['--include', java_file])
 
     try:
-        # Change to repo directory and run infiniloom
+        print(f"Executing infiniloom pack with {len(java_files)} Java files...")
+        print(f"Command: {' '.join(cmd)}\n")
+
         result = subprocess.run(
-            ['infiniloom', 'map', '.', '--include', '**/*.java', '--output', 'codebase-map.txt'],
+            cmd,
             cwd=repo_path,
             capture_output=True,
             text=True,
             check=True
         )
-        print(f"Infiniloom map generated successfully: {output_file}")
+
+        print(f"Infiniloom pack completed successfully!")
+        print(f"Output saved to: {output_file}")
+
         return output_file
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to execute infiniloom map: {e.stderr}")
+        raise RuntimeError(f"Failed to execute infiniloom pack: {e.stderr}")
     except FileNotFoundError:
         raise RuntimeError("infiniloom command not found. Please ensure it's installed and in PATH")
 
@@ -139,53 +164,15 @@ def get_changed_files(repo_path: str, source_branch: str, destination_branch: st
         raise RuntimeError(f"Failed to execute git diff: {e.stderr}")
 
 
-def parse_codebase_map(map_file_path: str, changed_files: List[str]) -> Dict[str, List[str]]:
-    """Parse codebase-map.txt and extract information for changed files."""
-    if not os.path.exists(map_file_path):
-        raise FileNotFoundError(f"Codebase map file not found: {map_file_path}")
-
-    file_info = {}
-
-    with open(map_file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-
-    # For each changed file, find its section in the codebase map
-    for changed_file in changed_files:
-        # Search for the file path in the map
-        # The format might vary, so we'll look for lines containing the file path
-        file_sections = []
-        lines = content.split('\n')
-
-        # Find sections related to this file
-        in_section = False
-        current_section = []
-
-        for i, line in enumerate(lines):
-            # Check if this line mentions our file
-            if changed_file in line:
-                # Collect context around this mention
-                # Get a few lines before and after for context
-                start_idx = max(0, i - 2)
-                end_idx = min(len(lines), i + 10)
-                section = '\n'.join(lines[start_idx:end_idx])
-                file_sections.append(section)
-
-        if file_sections:
-            file_info[changed_file] = file_sections
-        else:
-            file_info[changed_file] = [f"No detailed information found in codebase map"]
-
-    return file_info
-
-
 def main():
     """Main execution function."""
     parser = argparse.ArgumentParser(
-        description='Analyze code changes between branches and extract codebase map information'
+        description='Analyze Java code changes between branches and pack them with infiniloom'
     )
     parser.add_argument('source_branch', help='Source branch name')
     parser.add_argument('destination_branch', help='Destination branch name')
     parser.add_argument('--repo-path', help='Path to repository (overrides REPO_PATH env var)', default=None)
+    parser.add_argument('--output-dir', help='Output directory for llm.txt', default='output')
 
     args = parser.parse_args()
 
@@ -196,46 +183,51 @@ def main():
         else:
             repo_path = get_repo_path()
 
+        # Get script directory for output
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = os.path.join(script_dir, args.output_dir)
+
         print(f"Repository path: {repo_path}")
-        print(f"Analyzing changes: {args.source_branch} -> {args.destination_branch}\n")
+        print(f"Analyzing changes: {args.source_branch} -> {args.destination_branch}")
+        print(f"Output directory: {output_dir}\n")
 
-        # Step 1: Execute infiniloom map
-        print("Step 1: Generating codebase map...")
-        map_file = execute_infiniloom_map(repo_path)
-
-        # Step 2: Get changed files
-        print("\nStep 2: Getting changed files...")
+        # Step 1: Get changed files
+        print("Step 1: Getting changed files...")
         changed_files = get_changed_files(repo_path, args.source_branch, args.destination_branch)
 
-        # Step 3: Parse codebase map for changed files
-        print("\nStep 3: Extracting information from codebase map...")
-        file_info = parse_codebase_map(map_file, changed_files)
+        # Step 2: Filter Java files only
+        print("\nStep 2: Filtering Java files...")
+        java_files = filter_java_files(changed_files)
+
+        if not java_files:
+            print("No Java files found in the changes.")
+            return {
+                'changed_files': changed_files,
+                'java_files': [],
+                'output_file': None
+            }
+
+        print(f"Found {len(java_files)} Java file(s):")
+        for idx, file in enumerate(java_files, 1):
+            print(f"  {idx}. {file}")
+
+        # Step 3: Execute infiniloom pack
+        print("\nStep 3: Packing Java files with infiniloom...")
+        output_file = execute_infiniloom_pack(repo_path, java_files, output_dir)
 
         # Output results
         print("\n" + "="*80)
         print("RESULTS")
         print("="*80)
-
-        print("\nChanged Files:")
-        for idx, file in enumerate(changed_files, 1):
-            print(f"{idx}. {file}")
-
-        print("\n" + "="*80)
-        print("FILE DETAILS FROM CODEBASE MAP")
-        print("="*80)
-
-        for file_path, sections in file_info.items():
-            print(f"\n{'─'*80}")
-            print(f"File: {file_path}")
-            print(f"{'─'*80}")
-            for section in sections:
-                print(section)
-                print()
+        print(f"\nTotal changed files: {len(changed_files)}")
+        print(f"Java files processed: {len(java_files)}")
+        print(f"Output file: {output_file}")
 
         # Return data structure
         return {
             'changed_files': changed_files,
-            'file_info': file_info
+            'java_files': java_files,
+            'output_file': output_file
         }
 
     except Exception as e:
