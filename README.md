@@ -194,7 +194,6 @@ When used as a module, the `main()` function returns a dictionary with:
 ## Notes
 
 - The git diff uses three-dot syntax (`source...destination`) to show changes between the common ancestor and destination
-- The tool focuses on Java files but analyzes the full diff for context
 - Claude Code AI is used twice in the workflow:
   1. To identify relevant dependency classes from the diff
   2. To perform the final code review
