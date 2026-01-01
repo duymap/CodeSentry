@@ -1,13 +1,13 @@
 # Code Diff Analyzer
 
-An AI-powered code review tool that analyzes Java code changes between git branches using Claude Code and infiniloom.
+An AI-powered code review tool that analyzes code changes between git branches using Claude Code and infiniloom.
 
 ## Features
 
 - Compares two git branches to identify changed files
 - Automatically fetches remote branches if not available locally
 - Uses Claude Code AI to analyze git diffs and identify dependency classes
-- Packs related Java classes using infiniloom for LLM context
+- Packs related dependencies using infiniloom for LLM context
 - Generates comprehensive AI-powered code reviews with Claude Code
 - Reviews focus on code quality, potential bugs, performance, security, and improvements
 - Outputs diff, dependencies, prompts, and review results to a dedicated output directory
