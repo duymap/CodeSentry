@@ -1,4 +1,4 @@
-# Code Diff Analyzer
+# Code Sentry
 
 An AI-powered code review tool that analyzes code changes between git branches using Claude Code and infiniloom.
 
