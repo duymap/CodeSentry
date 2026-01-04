@@ -6,9 +6,10 @@ An AI-powered code review tool that analyzes code changes between git branches u
 
 - Compares two git branches to identify changed files
 - Automatically fetches remote branches if not available locally
-- Uses Claude Code AI to analyze git diffs and identify dependency classes
+- Uses AI (Claude Code or local LLM via Ollama) to analyze git diffs and identify dependency classes
 - Packs related dependencies using infiniloom for LLM context
-- Generates comprehensive AI-powered code reviews with Claude Code
+- Generates comprehensive AI-powered code reviews
+- Supports both Claude Code CLI (default) and local LLMs via Ollama
 - Reviews focus on code quality, potential bugs, performance, security, and improvements
 - Outputs diff, dependencies, prompts, and review results to a dedicated output directory
 
@@ -35,11 +36,19 @@ Before using this tool, you must install the following:
    infiniloom --version  # Verify installation
    ```
 
-4. **Claude Code** - Claude AI CLI tool
+4. **Claude Code** - Claude AI CLI tool (default)
    - Must be installed and authenticated
    - Used for AI-powered diff analysis and code reviews
    ```bash
    claude --version  # Verify installation
+   ```
+
+5. **Ollama** - Optional local LLM runtime (alternative to Claude Code)
+   - Installation: https://ollama.ai/
+   - Use if you prefer running LLMs locally
+   ```bash
+   ollama --version  # Verify installation
+   ollama list       # List installed models
    ```
 
 ### Python Dependencies
@@ -65,6 +74,24 @@ cp .env.example .env
 
 ```bash
 chmod +x main.py
+```
+
+4. (Optional) Set up local LLM with Ollama:
+
+```bash
+# Install Ollama from https://ollama.ai/
+
+# Pull a model (examples)
+ollama pull mistral
+ollama pull llama2
+ollama pull codellama
+ollama pull deepseek-coder
+
+# Verify the model is available
+ollama list
+
+# Add to your .env file:
+# LOCAL_LLM=mistral
 ```
 
 ## Usage
@@ -114,16 +141,39 @@ The infiniloom output uses toon format with balanced compression, optimized for 
 The tool uses a `.env` file to store configuration:
 
 - `REPO_PATH`: Path to the git repository (required if not using --repo-path flag)
+- `LOCAL_LLM`: (Optional) Name of Ollama model to use instead of Claude Code CLI
 
-Example `.env` file:
-```
+### LLM Configuration
+
+**Option 1: Claude Code CLI (Default)**
+```bash
+# .env file
 REPO_PATH=/Users/username/projects/myrepo
+# LOCAL_LLM not set - uses Claude Code CLI
 ```
+
+**Option 2: Local LLM via Ollama**
+```bash
+# .env file
+REPO_PATH=/Users/username/projects/myrepo
+LOCAL_LLM=mistral
+```
+
+Available Ollama models (examples):
+- `mistral` - Fast and capable general-purpose model
+- `llama2` - Meta's Llama 2 model
+- `codellama` - Specialized for code understanding
+- `deepseek-coder` - Optimized for code analysis
+- `qwen2.5-coder` - Alibaba's coding model
+
+To see all installed models: `ollama list`
 
 ## How It Works
 
 1. **Setup & Validation**
    - Loads configuration from `.env` file using python-dotenv
+   - Determines which LLM to use (Claude Code CLI or Ollama)
+   - Validates Ollama setup if LOCAL_LLM is configured
    - Validates the repository path from .env or --repo-path argument
    - Checks if branches exist locally, fetches from remote if needed
 
@@ -132,8 +182,8 @@ REPO_PATH=/Users/username/projects/myrepo
    - Saves raw diff to `diff.txt`
 
 3. **AI-Powered Dependency Detection**
-   - Sends the diff to Claude Code CLI for analysis
-   - Claude identifies relevant dependency classes that provide context for the changes
+   - Sends the diff to configured LLM for analysis (Claude Code or Ollama)
+   - AI identifies relevant dependency classes that provide context for the changes
    - Excludes library classes and focuses on project-specific dependencies
 
 4. **Context Packing**
@@ -149,7 +199,7 @@ REPO_PATH=/Users/username/projects/myrepo
    - Constructs a comprehensive prompt with:
      - The git diff
      - Packed dependency classes as reference context
-   - Sends to Claude Code for review focusing on:
+   - Sends to configured LLM for review focusing on:
      - Code quality and best practices
      - Potential bugs or issues
      - Performance considerations
@@ -167,14 +217,36 @@ The tool will exit with an error if:
 - REPO_PATH is not set in .env file and --repo-path is not provided
 - The repository path doesn't exist
 - infiniloom is not installed or not in PATH
-- Claude Code CLI (`claude` command) is not installed or not in PATH
+- Claude Code CLI (`claude` command) is not installed when using default mode
+- Ollama is not installed when LOCAL_LLM is set
+- The specified Ollama model is not found locally
 - Git commands fail (invalid branches, not a git repo, etc.)
 - The infiniloom pack command fails
 
 The tool will continue with warnings if:
-- No dependency classes are identified by Claude (review will proceed without context)
-- Claude Code requests timeout (partial results may be available)
+- No dependency classes are identified by the LLM (review will proceed without context)
+- LLM requests timeout (partial results may be available)
 - Infiniloom packing fails (review will proceed without packed context)
+
+### Common Errors and Solutions
+
+**Error: "Model 'xyz' not found in Ollama"**
+```bash
+# Solution: Pull the model first
+ollama pull xyz
+```
+
+**Error: "LOCAL_LLM is set but Ollama is not installed"**
+```bash
+# Solution 1: Install Ollama from https://ollama.ai/
+# Solution 2: Remove LOCAL_LLM from .env to use Claude Code CLI
+```
+
+**Error: "'claude' command not found"**
+```bash
+# Solution: Install Claude Code CLI or use Ollama instead
+# To use Ollama, add LOCAL_LLM=model_name to your .env file
+```
 
 ## Return Value
 
@@ -194,14 +266,16 @@ When used as a module, the `main()` function returns a dictionary with:
 ## Notes
 
 - The git diff uses three-dot syntax (`source...destination`) to show changes between the common ancestor and destination
-- Claude Code AI is used twice in the workflow:
+- AI (Claude Code CLI or Ollama) is used twice in the workflow:
   1. To identify relevant dependency classes from the diff
   2. To perform the final code review
 - If branches are not found locally, the tool automatically runs `git fetch --all`
 - The tool automatically checks out the destination branch to pack dependency classes
 - The output directory is created automatically if it doesn't exist
-- Claude Code requests have timeouts: 3 minutes for dependency analysis, 5 minutes for code review
+- LLM requests have timeouts: 3 minutes for dependency analysis, 5 minutes for code review
 - The infiniloom pack command uses specific options optimized for LLM consumption:
   - Removes comments and empty lines
   - Excludes symbols
   - Limits output to 16000 tokens
+- When using Ollama, ensure your system has enough resources (RAM/GPU) for the selected model
+- For best code review results with Ollama, use code-specialized models like `codellama`, `deepseek-coder`, or `qwen2.5-coder`

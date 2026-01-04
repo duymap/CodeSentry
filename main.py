@@ -14,6 +14,43 @@ from pathlib import Path
 from typing import List, Dict
 from dotenv import load_dotenv
 
+# Import Ollama-related functions
+from ollama import (
+    check_ollama_installed,
+    get_ollama_models,
+    verify_ollama_model,
+    call_ollama
+)
+
+
+def get_llm_config() -> Dict[str, str]:
+    """Get LLM configuration from environment variables."""
+    load_dotenv()
+
+    local_llm = os.getenv('LOCAL_LLM')
+
+    if local_llm:
+        # Using local LLM via Ollama
+        if not check_ollama_installed():
+            raise RuntimeError(
+                "LOCAL_LLM is set but Ollama is not installed.\n"
+                "Please install Ollama from https://ollama.ai/ or remove LOCAL_LLM from .env"
+            )
+
+        if not verify_ollama_model(local_llm):
+            available_models = get_ollama_models()
+            models_str = '\n  - '.join(available_models) if available_models else '  (none)'
+            raise RuntimeError(
+                f"Model '{local_llm}' not found in Ollama.\n"
+                f"Available models:\n  - {models_str}\n"
+                f"Install the model with: ollama pull {local_llm}"
+            )
+
+        return {'type': 'ollama', 'model': local_llm}
+    else:
+        # Using Claude Code CLI (default)
+        return {'type': 'claude', 'model': 'claude'}
+
 
 def get_repo_path() -> str:
     """Get repository path from environment variable or .env file."""
@@ -181,8 +218,8 @@ def read_file_content_from_git(repo_path: str, branch_ref: str, file_path: str) 
         return f"[Error: {str(e)}]"
 
 
-def analyze_diff_for_dependencies(diff_content: str) -> List[str]:
-    """Call Claude Code CLI to analyze git diff and suggest dependency classes for context."""
+def analyze_diff_for_dependencies(diff_content: str, llm_config: Dict[str, str]) -> List[str]:
+    """Call LLM (Claude Code CLI or Ollama) to analyze git diff and suggest dependency classes for context."""
 
     prompt = f"""
     You are a code review assistant specialized in identifying relevant dependencies and context for understanding code changes across multiple programming languages and frameworks.
@@ -253,47 +290,64 @@ def analyze_diff_for_dependencies(diff_content: str) -> List[str]:
     5. ✓ Are paths in the correct format for the detected language?
     """
 
-    print("Calling Claude Code CLI to analyze diff and suggest dependencies...")
+    llm_name = llm_config['model'] if llm_config['type'] == 'ollama' else 'Claude Code CLI'
+    print(f"Calling {llm_name} to analyze diff and suggest dependencies...")
 
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--output-format", "json"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=180000  # 3 minute timeout
-        )
-
-        response = json.loads(result.stdout)
-
-        # Extract classes from response
-        if "result" in response:
-            result_text = response["result"]
-            # Try to find JSON in the result
-            json_match = re.search(r'\{.*"classes".*\}', result_text, re.DOTALL)
+        if llm_config['type'] == 'ollama':
+            response_text = call_ollama(prompt, llm_config['model'])
+            json_match = re.search(r'\{.*"classes".*\}', response_text, re.DOTALL)
             if json_match:
                 classes_data = json.loads(json_match.group())
                 classes = classes_data.get("classes", [])
                 print(f"✓ Found {len(classes)} dependency classes")
                 return classes
             else:
-                print("⚠ Could not parse classes from Claude response")
+                print("⚠ Could not parse classes from LLM response")
                 return []
         else:
-            print("⚠ Unexpected response format")
-            return []
+            # Use Claude Code CLI
+            result = subprocess.run(
+                ["claude", "-p", prompt, "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=180000  # 3 minute timeout
+            )
+
+            response = json.loads(result.stdout)
+
+            # Extract classes from response
+            if "result" in response:
+                result_text = response["result"]
+                # Try to find JSON in the result
+                json_match = re.search(r'\{.*"classes".*\}', result_text, re.DOTALL)
+                if json_match:
+                    classes_data = json.loads(json_match.group())
+                    classes = classes_data.get("classes", [])
+                    print(f"✓ Found {len(classes)} dependency classes")
+                    return classes
+                else:
+                    print("⚠ Could not parse classes from Claude response")
+                    return []
+            else:
+                print("⚠ Unexpected response format")
+                return []
 
     except subprocess.TimeoutExpired:
-        print("✗ Claude request timed out")
+        print("✗ LLM request timed out")
         return []
     except subprocess.CalledProcessError as e:
         print(f"✗ Error calling Claude CLI: {e.stderr}")
         return []
     except json.JSONDecodeError as e:
-        print(f"✗ Error parsing Claude response: {e}")
+        print(f"✗ Error parsing LLM response: {e}")
         return []
     except FileNotFoundError:
         print("✗ 'claude' command not found. Please ensure Claude Code CLI is installed.")
+        return []
+    except RuntimeError as e:
+        print(f"✗ {e}")
         return []
     except Exception as e:
         print(f"✗ Unexpected error: {e}")
@@ -316,8 +370,159 @@ def get_full_diff(repo_path: str, source_ref: str, dest_ref: str) -> str:
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get git diff: {e.stderr}")
 
+
+def do_code_review(
+    full_diff: str,
+    llm_content: str,
+    source_branch: str,
+    destination_branch: str,
+    output_dir: str,
+    llm_config: Dict[str, str]
+) -> tuple[str, str, str]:
+    """
+    Build final prompt and send to LLM for code review.
+    
+    Args:
+        full_diff: The git diff content
+        llm_content: Additional context from dependency classes
+        source_branch: Name of source branch
+        destination_branch: Name of destination branch
+        output_dir: Directory to save prompt and review files
+        llm_config: LLM configuration dictionary
+        
+    Returns:
+        Tuple of (prompt_file_path, review_file_path, review_text)
+    """
+    # Step 4: Create final prompt and get code review
+    final_prompt = f"""Given the Git Diff and Reference as additional context, please help review Git Diff and provide suggestions if needed.
+----
+## Git Diff:
+Changes between {source_branch} and {destination_branch}:
+```diff
+{full_diff}
+```
+----
+## Reference as Additional Context (Related Classes)
+{llm_content}
+---
+Please provide a comprehensive code review focusing on:
+- Code quality and best practices
+- Potential bugs or issues
+- Performance considerations
+- Security concerns
+- Potential Business logic impact
+- Suggestions for improvements
+"""
+
+    # Save prompt for debugging
+    prompt_file = os.path.join(output_dir, 'prompt.txt')
+    with open(prompt_file, 'w', encoding='utf-8') as f:
+        f.write(final_prompt)
+    print(f"✓ Prompt saved to: {prompt_file}")
+
+    # Send to LLM for review
+    review_file = None
+    review_text = ""
+
+    try:
+        print("Sending prompt to LLM...")
+
+        if llm_config['type'] == 'ollama':
+            # Use Ollama
+            review_text = call_ollama(final_prompt, llm_config['model'])
+            print("✓ LLM review complete")
+        else:
+            # Use Claude Code CLI
+            result = subprocess.run(
+                ["claude", "-p", final_prompt, "--output-format", "json"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=300000  # 5 minute timeout
+            )
+
+            print("✓ Claude review complete")
+
+            # Parse the response
+            claude_response = json.loads(result.stdout)
+
+            # Extract the review from the response
+            if "result" in claude_response:
+                review_text = claude_response["result"]
+            else:
+                review_text = json.dumps(claude_response, indent=2)
+
+        # Save review to file
+        review_file = os.path.join(output_dir, 'code_review_result.md')
+        with open(review_file, 'w', encoding='utf-8') as f:
+            f.write(review_text)
+    except subprocess.TimeoutExpired:
+        print("✗ LLM request timed out after 5 minutes")
+        review_text = "[Timeout - no response received]"
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Error calling Claude CLI: {e.stderr}")
+        review_text = f"[Error: {e.stderr}]"
+    except json.JSONDecodeError as e:
+        print(f"✗ Error parsing LLM response: {e}")
+        review_text = "[Error parsing response]"
+    except FileNotFoundError:
+        print("✗ 'claude' command not found. Please ensure Claude Code CLI is installed.")
+        review_text = "[Claude CLI not found]"
+    except Exception as e:
+        print(f"✗ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
+        review_text = f"[Error: {str(e)}]"
+
+    return prompt_file, review_file, review_text
+
+
+def pack_dependencies(
+    repo_path: str,
+    classes: List[str],
+    output_dir: str,
+    dest_ref: str,
+    destination_branch: str
+) -> tuple[str, str]:
+    """
+    Pack dependency classes using infiniloom and read the content.
+        
+    Returns:
+        Tuple of (llm_content, output_file_path)
+    """
+    print("Packing dependency classes with infiniloom...")
+    llm_content = ""
+    output_file = None
+
+    if classes:
+        try:
+            current_branch = get_current_branch(repo_path)
+            # Checkout destination branch if not already on it
+            if current_branch != dest_ref and current_branch != destination_branch:
+                checkout_branch(repo_path, dest_ref)
+            else:
+                print("✓ Already on destination branch")
+
+            # Execute infiniloom pack with the class list
+            output_file = execute_infiniloom_pack_with_classes(repo_path, classes, output_dir)
+
+            # Read llm.txt content
+            if output_file and os.path.exists(output_file):
+                with open(output_file, 'r', encoding='utf-8') as f:
+                    llm_content = f.read()
+                print(f"✓ LLM content read ({len(llm_content)} characters)\n")
+        except Exception as e:
+            print(f"\n✗ Error packing dependencies: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            llm_content = "[Dependency context not available - infiniloom pack failed]"
+            print()
+
+    return llm_content, output_file
+
+
 def main():
-    """Main execution function."""
+   
     parser = argparse.ArgumentParser(
         description='AI-powered code review tool using git diff and Claude'
     )
@@ -329,6 +534,11 @@ def main():
     args = parser.parse_args()
 
     try:
+        # Get LLM configuration
+        llm_config = get_llm_config()
+        llm_display = llm_config['model'] if llm_config['type'] == 'ollama' else 'Claude Code CLI'
+        print(f"Using LLM: {llm_display}\n")
+
         # Get repository path
         if args.repo_path:
             repo_path = args.repo_path
@@ -357,9 +567,9 @@ def main():
         with open(diff_file, 'w', encoding='utf-8') as f:
             f.write(full_diff)
 
-        # Step 2: Analyze diff with Claude to get dependency classes
+        # Step 2: Analyze diff with LLM to get dependency classes
         print("Analyzing diff to identify dependency classes..")
-        classes = analyze_diff_for_dependencies(full_diff)
+        classes = analyze_diff_for_dependencies(full_diff, llm_config)
 
         if classes:
             print(f"\nDependency classes identified:")
@@ -371,107 +581,23 @@ def main():
 
 
         # Step 3: Checkout destination branch and pack dependencies with infiniloom
-        print("Packing dependency classes with infiniloom...")
-        llm_content = ""
-        output_file = None
+        llm_content, output_file = pack_dependencies(
+            repo_path=repo_path,
+            classes=classes,
+            output_dir=output_dir,
+            dest_ref=dest_ref,
+            destination_branch=args.destination_branch
+        )
 
-        if classes:
-            try:
-                current_branch = get_current_branch(repo_path)
-                # Checkout destination branch if not already on it
-                if current_branch != dest_ref and current_branch != args.destination_branch:
-                    checkout_branch(repo_path, dest_ref)
-                else:
-                    print("✓ Already on destination branch")
-
-                # Execute infiniloom pack with the class list
-                output_file = execute_infiniloom_pack_with_classes(repo_path, classes, output_dir)
-
-                # Read llm.txt content
-                if output_file and os.path.exists(output_file):
-                    with open(output_file, 'r', encoding='utf-8') as f:
-                        llm_content = f.read()
-                    print(f"✓ LLM content read ({len(llm_content)} characters)\n")
-            except Exception as e:
-                print(f"\n✗ Error packing dependencies: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                llm_content = "[Dependency context not available - infiniloom pack failed]"
-                print()
-
-        # Step 4: Create final prompt and get code review from Claude
-        final_prompt = f"""Given the Git Diff and Reference as additional context, please help review Git Diff and provide suggestions if needed.
-----
-## Git Diff:
-Changes between {args.source_branch} and {args.destination_branch}:
-```diff
-{full_diff}
-```
-----
-## Reference as Additional Context (Related Classes)
-{llm_content}
----
-Please provide a comprehensive code review focusing on:
-- Code quality and best practices
-- Potential bugs or issues
-- Performance considerations
-- Security concerns
-- Potential Business logic impact
-- Suggestions for improvements
-"""
-
-        # Save prompt for debugging
-        prompt_file = os.path.join(output_dir, 'prompt.txt')
-        with open(prompt_file, 'w', encoding='utf-8') as f:
-            f.write(final_prompt)
-        print(f"✓ Prompt saved to: {prompt_file}")
-
-        # Send to Claude for review
-        review_file = None
-        review_text = ""
-
-        try:
-            print("Sending prompt to LLM...")
-            result = subprocess.run(
-                ["claude", "-p", final_prompt, "--output-format", "json"],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=300000  # 5 minute timeout
-            )
-
-            print("✓ Claude review complete")
-
-            # Parse the response
-            claude_response = json.loads(result.stdout)
-
-            # Extract the review from the response
-            if "result" in claude_response:
-                review_text = claude_response["result"]
-            else:
-                review_text = json.dumps(claude_response, indent=2)
-
-            # Save review to file
-            review_file = os.path.join(output_dir, 'code_review_result.md')
-            with open(review_file, 'w', encoding='utf-8') as f:
-                f.write(review_text)
-        except subprocess.TimeoutExpired:
-            print("✗ Claude request timed out after 5 minutes")
-            review_text = "[Timeout - no response received]"
-        except subprocess.CalledProcessError as e:
-            print(f"✗ Error calling Claude CLI: {e.stderr}")
-            review_text = f"[Error: {e.stderr}]"
-        except json.JSONDecodeError as e:
-            print(f"✗ Error parsing Claude response: {e}")
-            review_text = "[Error parsing response]"
-        except FileNotFoundError:
-            print("✗ 'claude' command not found. Please ensure Claude Code CLI is installed.")
-            review_text = "[Claude CLI not found]"
-        except Exception as e:
-            print(f"✗ Unexpected error: {e}")
-            import traceback
-            traceback.print_exc()
-            review_text = f"[Error: {str(e)}]"
+        # Step 4: Create final prompt and get code review from LLM
+        prompt_file, review_file, review_text = do_code_review(
+            full_diff=full_diff,
+            llm_content=llm_content,
+            source_branch=args.source_branch,
+            destination_branch=args.destination_branch,
+            output_dir=output_dir,
+            llm_config=llm_config
+        )
 
         # Final summary
         print("\n" + "="*20)
